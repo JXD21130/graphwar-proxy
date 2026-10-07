@@ -47,7 +47,10 @@ function clientIp(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
-function reject(socket, code, msg) {
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+function reject(socket, code, msg, why) {
+  log('rechazado', code, msg, why || '');
   socket.write(`HTTP/1.1 ${code} ${msg}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   socket.destroy();
 }
@@ -63,27 +66,27 @@ server.on('upgrade', async (req, socket, head) => {
   socket.on('error', () => {});
 
   const origin = req.headers.origin || '';
-  if (!ALLOWED_ORIGINS.includes('*') && !ALLOWED_ORIGINS.includes(origin)) return reject(socket, 403, 'Forbidden');
+  if (!ALLOWED_ORIGINS.includes('*') && !ALLOWED_ORIGINS.includes(origin)) return reject(socket, 403, 'Forbidden', 'origen no permitido: ' + origin);
 
   let host, port;
   try {
     const u = new URL(req.url, 'http://x');
     host = u.searchParams.get('host') || '';
     port = parseInt(u.searchParams.get('port') || '', 10);
-  } catch (e) { return reject(socket, 400, 'Bad Request'); }
+  } catch (e) { return reject(socket, 400, 'Bad Request', 'url invalida'); }
 
-  if (!/^[A-Za-z0-9.-]{1,253}$/.test(host) || !(port >= MIN_PORT && port <= 65535)) return reject(socket, 400, 'Bad Request');
+  if (!/^[A-Za-z0-9.-]{1,253}$/.test(host) || !(port >= MIN_PORT && port <= 65535)) return reject(socket, 400, 'Bad Request', 'host/puerto invalidos: ' + host + ':' + port);
 
   const ip = clientIp(req);
-  if (total >= MAX_TOTAL || (perIp.get(ip) || 0) >= MAX_PER_IP) return reject(socket, 429, 'Too Many Requests');
+  if (total >= MAX_TOTAL || (perIp.get(ip) || 0) >= MAX_PER_IP) return reject(socket, 429, 'Too Many Requests', 'limite de conexiones ' + ip);
 
   // Resolver nosotros y conectar a la IP resuelta (evita DNS rebinding)
   let address;
   try {
     address = net.isIP(host) ? host : (await dns.lookup(host)).address;
-  } catch (e) { return reject(socket, 502, 'Bad Gateway'); }
+  } catch (e) { return reject(socket, 502, 'Bad Gateway', 'DNS fallo para ' + host + ': ' + e.message); }
 
-  if (!ALLOW_PRIVATE && blocked.check(address, net.isIPv6(address) ? 'ipv6' : 'ipv4')) return reject(socket, 403, 'Forbidden');
+  if (!ALLOW_PRIVATE && blocked.check(address, net.isIPv6(address) ? 'ipv6' : 'ipv4')) return reject(socket, 403, 'Forbidden', 'destino bloqueado ' + address);
 
   total++; perIp.set(ip, (perIp.get(ip) || 0) + 1);
   let released = false;
@@ -117,12 +120,13 @@ server.on('upgrade', async (req, socket, head) => {
     if (rest.length > MAX_LINE * 4) tcp.destroy();
   });
 
-  tcp.on('error', () => { clearTimeout(connectTimer); if (!ws) { reject(socket, 502, 'Bad Gateway'); release(); } else ws.close(); });
+  tcp.on('error', (err) => { clearTimeout(connectTimer); if (!ws) { reject(socket, 502, 'Bad Gateway', 'TCP fallo ' + host + ':' + port + ' -> ' + err.message); release(); } else ws.close(); });
   tcp.on('close', () => { release(); if (ws) ws.close(); else socket.destroy(); });
   tcp.setTimeout(IDLE_TIMEOUT, () => tcp.destroy());
 
   tcp.on('connect', () => {
     clearTimeout(connectTimer);
+    log('conectado', host, address + ':' + port);
     wss.handleUpgrade(req, socket, head, (w) => {
       ws = w;
       for (const l of pending) ws.send(l);
