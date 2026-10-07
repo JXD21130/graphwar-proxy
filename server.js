@@ -33,8 +33,15 @@ for (const [net4, bits] of [
   ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
   ['224.0.0.0', 4], ['240.0.0.0', 4],
 ]) blocked.addSubnet(net4, bits, 'ipv4');
-for (const [net6, bits] of [['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]])
+// OJO: no bloquear '::ffff:0:0/96': Node trata las IPv4 como IPv4-mapeadas y bloquearia TODAS las IPv4 publicas.
+for (const [net6, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]])
   blocked.addSubnet(net6, bits, 'ipv6');
+
+function isBlocked(address) {
+  const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);   // IPv4 escondida en IPv6
+  if (m) address = m[1];
+  return blocked.check(address, net.isIPv6(address) ? 'ipv6' : 'ipv4');
+}
 
 const perIp = new Map();
 let total = 0;
@@ -86,7 +93,7 @@ server.on('upgrade', async (req, socket, head) => {
     address = net.isIP(host) ? host : (await dns.lookup(host)).address;
   } catch (e) { return reject(socket, 502, 'Bad Gateway', 'DNS fallo para ' + host + ': ' + e.message); }
 
-  if (!ALLOW_PRIVATE && blocked.check(address, net.isIPv6(address) ? 'ipv6' : 'ipv4')) return reject(socket, 403, 'Forbidden', 'destino bloqueado ' + address);
+  if (!ALLOW_PRIVATE && isBlocked(address)) return reject(socket, 403, 'Forbidden', 'destino bloqueado ' + address);
 
   total++; perIp.set(ip, (perIp.get(ip) || 0) + 1);
   let released = false;
